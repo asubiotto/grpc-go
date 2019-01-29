@@ -25,6 +25,7 @@ import (
 	"io"
 	"math"
 	"net"
+	"runtime/debug"
 	"strconv"
 	"sync"
 	"sync/atomic"
@@ -647,6 +648,7 @@ func (t *http2Server) handlePing(f *http2.PingFrame) {
 	}
 	pingAck := &ping{ack: true}
 	copy(pingAck.data[:], f.Data[:])
+	grpclog.Infof("received ping from %s, putting response on control buffer controlbuf len is %d", t.remoteAddr.String(), t.controlBuf.len())
 	t.controlBuf.put(pingAck)
 
 	now := time.Now()
@@ -922,6 +924,42 @@ func (t *http2Server) keepalive() {
 				t.kpCount++
 				t.czmu.Unlock()
 			}
+			grpclog.Infof("server sending ping to %s", t.remoteAddr)
+			/*go func() {
+				const format = "2006-01-02T15_04_05.999"
+				suffix := timeutil.Now().Format(format)
+				profiles := []string{"goroutine", "mutex", "block"}
+				for _, profile := range profiles {
+					path := profile + suffix
+					f, err := os.Create(filepath.Join("./server_profiles", path))
+					if err != nil {
+						grpclog.Warningf("error creating file %s %v", path, err)
+						continue
+					} else {
+						defer f.Close()
+					}
+					// Use debug=2, goroutine profiles written in more legible
+					// format.
+					if err := pprof.Lookup(profile).WriteTo(f, 2); err != nil {
+						grpclog.Warningf("error writing to file %s %v", path, err)
+						continue
+					}
+				}
+				path := "cpu" + suffix
+				f, err := os.Create(filepath.Join("./server_profiles", path))
+				if err != nil {
+					grpclog.Warningf("error creating cpu profile %s %v", path, err)
+					return
+				}
+				defer f.Close()
+				if err := pprof.StartCPUProfile(f); err != nil {
+					grpclog.Warningf("unable to start cpu profile %v", err)
+					return
+				}
+
+				<-time.After(2 * time.Second)
+				pprof.StopCPUProfile()
+			}()*/
 			t.controlBuf.put(p)
 			keepalive.Reset(t.kp.Timeout)
 		case <-t.ctx.Done():
@@ -934,6 +972,8 @@ func (t *http2Server) keepalive() {
 // TODO(zhaoq): Now the destruction is not blocked on any pending streams. This
 // could cause some resource issue. Revisit this later.
 func (t *http2Server) Close() error {
+	grpclog.Infof("server closing connection to %s", t.remoteAddr)
+	debug.PrintStack()
 	t.mu.Lock()
 	if t.state == closing {
 		t.mu.Unlock()

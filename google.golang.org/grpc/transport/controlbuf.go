@@ -38,12 +38,14 @@ type itemNode struct {
 }
 
 type itemList struct {
-	head *itemNode
-	tail *itemNode
+	length int
+	head   *itemNode
+	tail   *itemNode
 }
 
 func (il *itemList) enqueue(i interface{}) {
 	n := &itemNode{it: i}
+	il.length++
 	if il.tail == nil {
 		il.head, il.tail = n, n
 		return
@@ -67,10 +69,16 @@ func (il *itemList) dequeue() interface{} {
 	if il.head == nil {
 		il.tail = nil
 	}
+	il.length--
 	return i
 }
 
+func (il *itemList) len() int {
+	return il.length
+}
+
 func (il *itemList) dequeueAll() *itemNode {
+	il.length = 0
 	h := il.head
 	il.head, il.tail = nil, nil
 	return h
@@ -277,6 +285,13 @@ func (c *controlBuffer) executeAndPut(f func(it interface{}) bool, it interface{
 		}
 	}
 	return true, nil
+}
+
+func (c *controlBuffer) len() int {
+	c.mu.Lock()
+	l := c.list.len()
+	c.mu.Unlock()
+	return l
 }
 
 func (c *controlBuffer) get(block bool) (interface{}, error) {

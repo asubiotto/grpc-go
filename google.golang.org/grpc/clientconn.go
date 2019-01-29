@@ -908,6 +908,10 @@ func (cc *ClientConn) ChannelzMetric() *channelz.ChannelInternalMetric {
 	}
 }
 
+func (cc *ClientConn) Target() string {
+	return cc.target
+}
+
 func (cc *ClientConn) incrCallsStarted() {
 	cc.czmu.Lock()
 	cc.callsStarted++

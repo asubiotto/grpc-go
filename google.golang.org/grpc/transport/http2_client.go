@@ -19,13 +19,22 @@
 package transport
 
 import (
+	"fmt"
 	"io"
 	"math"
 	"net"
+	"os"
+	"path/filepath"
+	"runtime/debug"
+	"runtime/pprof"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/cockroachdb/cockroach/pkg/util/timeutil"
+
+	"google.golang.org/grpc/grpclog"
 
 	"golang.org/x/net/context"
 	"golang.org/x/net/http2"
@@ -149,6 +158,7 @@ func isTemporary(err error) bool {
 // and starts to receive messages on it. Non-nil error returns if construction
 // fails.
 func newHTTP2Client(connectCtx, ctx context.Context, addr TargetInfo, opts ConnectOptions, onSuccess func()) (_ ClientTransport, err error) {
+	grpclog.Infof("testing that grpc logging works: creating new client to %s", addr.Addr)
 	scheme := "http"
 	ctx, cancel := context.WithCancel(ctx)
 	defer func() {
@@ -697,6 +707,8 @@ func (t *http2Client) closeStream(s *Stream, err error, rst bool, rstCode http2.
 // only once on a transport. Once it is called, the transport should not be
 // accessed any more.
 func (t *http2Client) Close() error {
+	grpclog.Infof("client closing connection to %s", t.remoteAddr)
+	debug.PrintStack()
 	t.mu.Lock()
 	// Make sure we only Close once.
 	if t.state == closing {
@@ -1150,6 +1162,7 @@ func (t *http2Client) reader() {
 				}
 				continue
 			} else {
+				grpclog.Errorf("transport error", err)
 				// Transport error.
 				t.Close()
 				return
@@ -1183,6 +1196,7 @@ func (t *http2Client) keepalive() {
 	for {
 		select {
 		case <-timer.C:
+			length := -1
 			if atomic.CompareAndSwapUint32(&t.activity, 1, 0) {
 				timer.Reset(t.kp.Time)
 				continue
@@ -1207,6 +1221,8 @@ func (t *http2Client) keepalive() {
 					t.kpCount++
 					t.czmu.Unlock()
 				}
+				grpclog.Infof("sending ping to %s", t.remoteAddr)
+				length = t.controlBuf.len()
 				// Send ping.
 				t.controlBuf.put(p)
 			}
@@ -1219,6 +1235,46 @@ func (t *http2Client) keepalive() {
 					timer.Reset(t.kp.Time)
 					continue
 				}
+				grpclog.Infof("controlbuf length was %d at time of enqueue, writing profiles", length)
+				const format = "2006-01-02T15_04_05.999"
+				suffix := timeutil.Now().Format(format)
+				profiles := []string{"goroutine", "mutex", "block", "threadcreate"}
+				for _, profile := range profiles {
+					path := profile + suffix
+					f, err := os.Create(filepath.Join("./exitprofiles", path))
+					if err != nil {
+						grpclog.Warningf("error creating file %s %v", path, err)
+						fmt.Println("error creating file", path, err)
+						continue
+					} else {
+						defer f.Close()
+					}
+					// Use debug=2, goroutine profiles written in more legible
+					// format.
+					if err := pprof.Lookup(profile).WriteTo(f, 2); err != nil {
+						grpclog.Warningf("error writing to file %s %v", path, err)
+						fmt.Println("error writing to file", path, err)
+						continue
+					}
+				}
+
+				path := "cpu" + suffix
+				f, err := os.Create(filepath.Join(".", path))
+				if err != nil {
+					grpclog.Warningf("error creating cpu profile %s %v", path, err)
+					t.Close()
+					return
+				}
+				defer f.Close()
+				if err := pprof.StartCPUProfile(f); err != nil {
+					grpclog.Warningf("unable to start cpu profile %v", err)
+					t.Close()
+					return
+				}
+
+				<-time.After(2 * time.Second)
+				pprof.StopCPUProfile()
+
 				t.Close()
 				return
 			case <-t.ctx.Done():
